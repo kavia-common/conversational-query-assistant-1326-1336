@@ -5,6 +5,7 @@ Lightweight REST API for a chatbot that calls OpenAI. No database or persistence
 """
 
 from pathlib import Path
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -15,12 +16,26 @@ SECRET_KEY = 'django-insecure-0ku_as45vs5isd^px=t#m8g#^*x7f=w#gw-xb^t@^-pom)r^t6
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = [
-    '.kavia.ai',
-    'localhost',
-    '127.0.0.1',
-    'testserver',
-]
+# Allow hosts:
+# - Prefer ALLOWED_HOSTS environment variable (comma-separated values).
+# - Fallback to permissive defaults for development, including wildcard when explicitly desired.
+# Note: In production, set ALLOWED_HOSTS env var explicitly (e.g., "api.example.com").
+_raw_allowed_hosts = os.getenv("ALLOWED_HOSTS", "").strip()
+
+if _raw_allowed_hosts:
+    # Split by comma, strip whitespace, ignore empties
+    ALLOWED_HOSTS = [h.strip() for h in _raw_allowed_hosts.split(",") if h.strip()]
+else:
+    # Development defaults; can include wildcard if desired to avoid 'Invalid Host header'
+    # Keeping common local hosts and testserver for Django test client.
+    ALLOWED_HOSTS = [
+        "*",              # allow all in dev; override via env in prod
+        ".kavia.ai",
+        "localhost",
+        "127.0.0.1",
+        "testserver",
+        "chatbot_frontend",
+    ]
 
 # Application definition
 # Remove admin/auth/session apps to avoid DB dependency, keep minimal stack
