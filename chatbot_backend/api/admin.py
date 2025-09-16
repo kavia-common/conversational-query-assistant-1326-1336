@@ -1,3 +1,1 @@
-from django.contrib import admin
-
-# Register your models here.
+# Admin site is not used because this project avoids database usage.
