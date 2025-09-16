@@ -9,13 +9,16 @@ from rest_framework.renderers import JSONRenderer
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
+# LangChain imports
 try:
-    # Prefer the official OpenAI Python SDK v1 if available
-    from openai import OpenAI  # type: ignore
-    _HAS_OPENAI = True
-except Exception:  # pragma: no cover - fallback if SDK not present at runtime
-    _HAS_OPENAI = False
-    OpenAI = None  # type: ignore
+    # langchain and langchain-openai provide a high-level interface to OpenAI
+    from langchain_openai import ChatOpenAI  # type: ignore
+    from langchain_core.prompts import ChatPromptTemplate  # type: ignore
+    _HAS_LANGCHAIN = True
+except Exception:  # pragma: no cover
+    _HAS_LANGCHAIN = False
+    ChatOpenAI = None  # type: ignore
+    ChatPromptTemplate = None  # type: ignore
 
 
 # PUBLIC_INTERFACE
@@ -55,28 +58,35 @@ question_param = openapi.Schema(
 )
 
 
-def _get_openai_client() -> Optional[Any]:
+def _build_prompt(system_prompt: Optional[str]) -> Any:
     """
-    Create an OpenAI client if OPENAI_API_KEY exists and SDK available.
+    Build a LangChain ChatPromptTemplate using optional system prompt.
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key or not _HAS_OPENAI:
+    system_part = system_prompt if isinstance(system_prompt, str) and system_prompt.strip() else "You are a helpful assistant."
+    # A simple two-part prompt: system + user input
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_part),
+            ("user", "{question}"),
+        ]
+    )
+    return prompt
+
+
+def _get_llm(model_name: str) -> Optional[Any]:
+    """
+    Initialize a LangChain ChatOpenAI LLM if API key is set and langchain is available.
+    Uses OPENAI_API_KEY from environment. No persistence is involved.
+    """
+    if not _HAS_LANGCHAIN:
+        return None
+    if not os.getenv("OPENAI_API_KEY"):
         return None
     try:
-        return OpenAI(api_key=api_key)
+        # ChatOpenAI reads OPENAI_API_KEY from env; pass model name through
+        return ChatOpenAI(model=model_name, temperature=0.7)
     except Exception:
         return None
-
-
-def _build_messages(question: str, system_prompt: Optional[str]) -> list:
-    """
-    Build messages array for chat.completions API.
-    """
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": question})
-    return messages
 
 
 # PUBLIC_INTERFACE
@@ -85,7 +95,7 @@ def _build_messages(question: str, system_prompt: Optional[str]) -> list:
     operation_id="chat_create",
     tags=["chat"],
     summary="Ask chatbot a question",
-    description="Accepts a user question, forwards it to OpenAI, and returns the generated answer. No data is persisted.",
+    description="Accepts a user question, forwards it to OpenAI through LangChain, and returns the generated answer. No data is persisted.",
     request_body=question_param,
     responses={
         200: openapi.Response(
@@ -130,29 +140,30 @@ def chat(request):
         return Response({"error": "Field 'question' is required and must be a non-empty string."},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    client = _get_openai_client()
-    if client is None:
-        # Give actionable error messages for missing SDK or API key
-        if not _HAS_OPENAI:
-            return Response({"error": "OpenAI SDK not installed on server."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    llm = _get_llm(model)
+    if llm is None:
+        if not _HAS_LANGCHAIN:
+            return Response({"error": "LangChain packages not installed on server."},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         if not os.getenv("OPENAI_API_KEY"):
             return Response({"error": "OPENAI_API_KEY environment variable is not set."},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response({"error": "Failed to initialize OpenAI client."},
+        return Response({"error": "Failed to initialize language model."},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     try:
-        # Using Chat Completions API from OpenAI Python SDK v1
-        messages = _build_messages(question.strip(), system_prompt if isinstance(system_prompt, str) else None)
-        completion = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.7,
-        )
-        content = completion.choices[0].message.content if completion and completion.choices else ""
+        # Build a simple chain: prompt -> ChatOpenAI
+        prompt = _build_prompt(system_prompt)
+        chain = prompt | llm  # LCEL composition: PromptTemplate -> LLM
+        # Invoke the chain with the question variable; returns an AIMessage
+        ai_message = chain.invoke({"question": question.strip()})
+        # ai_message could be an AIMessage or str depending on LC version; handle both
+        content = getattr(ai_message, "content", None) or (str(ai_message) if ai_message is not None else "")
+
         if not content:
-            return Response({"error": "Empty response from OpenAI."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": "Empty response from OpenAI via LangChain."},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response({"answer": content})
     except Exception as e:
-        return Response({"error": f"Failed to retrieve response from OpenAI: {str(e)}"},
+        return Response({"error": f"Failed to retrieve response from OpenAI via LangChain: {str(e)}"},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
